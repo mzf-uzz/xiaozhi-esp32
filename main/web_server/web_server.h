@@ -60,6 +60,10 @@ private:
     static esp_err_t config_post_handler(httpd_req_t *req);
     static esp_err_t api_config_get_handler(httpd_req_t *req);
     static esp_err_t api_config_post_handler(httpd_req_t *req);
+    static esp_err_t api_servo_handler(httpd_req_t *req);
+    static esp_err_t api_gpio_scan_handler(httpd_req_t *req);
+    static esp_err_t gpio_test_page_handler(httpd_req_t *req);
+    static esp_err_t servo_test_page_handler(httpd_req_t *req);
 
     // CORS处理
     static esp_err_t cors_handler(httpd_req_t *req);

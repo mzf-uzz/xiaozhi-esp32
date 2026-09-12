@@ -36,6 +36,7 @@ async def ota_config(request: Request):
     logger.info(f"OTA 请求: Device-Id={device_id}, Client-Id={client_id}, UA={user_agent}")
 
     ws_url = f"ws://{config.SERVER_HOST}:{config.WS_PORT}/ws"
+    ota_url = f"http://{config.SERVER_HOST}:{config.OTA_PORT}/xiaozhi/ota/"
 
     response = {
         "websocket": {
@@ -46,6 +47,10 @@ async def ota_config(request: Request):
         "server_time": {
             "timestamp": 0,
             "timezone_offset": 480
+        },
+        "firmware": {
+            "version": "2.1.0",
+            "url": f"http://{config.SERVER_HOST}/xiaozhi/firmware/ota.bin"
         }
     }
 

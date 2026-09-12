@@ -8,6 +8,7 @@
 #include "config.h"
 #include "mcp_server.h"
 #include "lamp_controller.h"
+#include "servo_controller.h"
 #include "led/single_led.h"
 #include "assets/lang_config.h"
 #include <wifi_manager.h>
@@ -38,6 +39,7 @@ private:
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_ = nullptr;
     Display* display_ = nullptr;
+    ServoController servo_;
     Button boot_button_;
     Button touch_button_;
     Button volume_up_button_;
@@ -412,6 +414,86 @@ private:
                 return std::string("Confused animation played");
             });
 
+        // ==================== 舵机控制工具 ====================
+
+        mcp_server.AddTool("self.servo.neck",
+            "Set neck servo angle.\n"
+            "Args:\n"
+            "  `angle`: Target angle (0-180), 90 is center\n"
+            "Return:\n"
+            "  Success message",
+            PropertyList({
+                Property("angle", kPropertyTypeInteger, 90, 0, 180)
+            }),
+            [this](const PropertyList& properties) -> ReturnValue {
+                servo_.EnsureInit();
+                int angle = properties["angle"].value<int>();
+                servo_.SetNeckAngle(angle);
+                return std::string("Neck servo set to ") + std::to_string(angle) + " degrees";
+            });
+
+        mcp_server.AddTool("self.servo.left_hand",
+            "Set left hand servo angle.\n"
+            "Args:\n"
+            "  `angle`: Target angle (0-180), 90 is center\n"
+            "Return:\n"
+            "  Success message",
+            PropertyList({
+                Property("angle", kPropertyTypeInteger, 90, 0, 180)
+            }),
+            [this](const PropertyList& properties) -> ReturnValue {
+                int angle = properties["angle"].value<int>();
+                servo_.SetLeftAngle(angle);
+                return std::string("Left hand servo set to ") + std::to_string(angle) + " degrees";
+            });
+
+        mcp_server.AddTool("self.servo.right_hand",
+            "Set right hand servo angle.\n"
+            "Args:\n"
+            "  `angle`: Target angle (0-180), 90 is center\n"
+            "Return:\n"
+            "  Success message",
+            PropertyList({
+                Property("angle", kPropertyTypeInteger, 90, 0, 180)
+            }),
+            [this](const PropertyList& properties) -> ReturnValue {
+                int angle = properties["angle"].value<int>();
+                servo_.SetRightAngle(angle);
+                return std::string("Right hand servo set to ") + std::to_string(angle) + " degrees";
+            });
+
+        mcp_server.AddTool("self.servo.center",
+            "Center all servos to default position (90 degrees)",
+            PropertyList(),
+            [this](const PropertyList& properties) -> ReturnValue {
+                servo_.CenterAll();
+                return std::string("All servos centered");
+            });
+
+        mcp_server.AddTool("self.servo.wave",
+            "Wave hands animation - both hands waving alternately",
+            PropertyList(),
+            [this](const PropertyList& properties) -> ReturnValue {
+                servo_.WaveHands();
+                return std::string("Wave hands animation completed");
+            });
+
+        mcp_server.AddTool("self.servo.nod",
+            "Nod animation - neck tilting up and down",
+            PropertyList(),
+            [this](const PropertyList& properties) -> ReturnValue {
+                servo_.Nod();
+                return std::string("Nod animation completed");
+            });
+
+        mcp_server.AddTool("self.servo.shake",
+            "Shake head animation - neck turning left and right",
+            PropertyList(),
+            [this](const PropertyList& properties) -> ReturnValue {
+                servo_.ShakeHead();
+                return std::string("Shake head animation completed");
+            });
+
         mcp_server.AddTool("self.network.get_ip",
             "获取当前WiFi IP地址信息，用于语音播报或状态查询",
             PropertyList(),
@@ -479,6 +561,9 @@ private:
     }
 
 public:
+    // 获取舵机控制器引用（供外部函数调用）
+    ServoController& GetServoController() { return servo_; }
+
     void MotorDance(uint8_t speed_percent = 100) {
         ESP_LOGI(TAG, "电机跳舞: 执行完整的舞蹈序列 (速度: %d%%)", speed_percent);
 
@@ -520,13 +605,14 @@ public:
 public:
     CompactWifiBoard() :
         boot_button_(BOOT_BUTTON_GPIO),
-        touch_button_(TOUCH_BUTTON_GPIO),
+        touch_button_(GPIO_NUM_NC),  // GPIO47 已改为脖子舵机，禁用触控按钮
         volume_up_button_(VOLUME_UP_BUTTON_GPIO),
         volume_down_button_(VOLUME_DOWN_BUTTON_GPIO) {
         InitializeDisplayI2c();
         InitializeSsd1306Display();
         InitializeButtons();
         InitializeTools();
+        // 舵机延迟初始化：在第一次使用时才初始化（避免与 Application 的 LEDC 初始化冲突）
     }
     virtual AudioCodec* GetAudioCodec() override {
 #ifdef AUDIO_I2S_METHOD_SIMPLEX
@@ -544,9 +630,11 @@ public:
     }
 
     // Motor control interface for different emotions and actions
+    // 同时配合电机和舵机动作
     void OnWakeUp() {
         ESP_LOGI(TAG, "电机情感: 唤醒被触发 - 执行兴奋动作");
         PerformMotorAction(1, 300); // FORWARD for 300ms - 兴奋的前进动作
+        servo_.ExcitedDance();       // 舵机兴奋动作
     }
 
     void OnHappy() {
@@ -554,11 +642,13 @@ public:
         PerformMotorAction(1, 200); // FORWARD for 200ms - 简单的开心动作
         vTaskDelay(pdMS_TO_TICKS(100));
         PerformMotorAction(3, 200); // LEFT for 200ms - 左转表示开心
+        servo_.HappyDance();         // 舵机开心挥手
     }
 
     void OnSad() {
         ESP_LOGI(TAG, "电机情感: 悲伤被触发 - 执行缓慢动作");
         PerformMotorAction(2, 400); // BACKWARD for 400ms - 缓慢后退表示悲伤
+        servo_.SadPose();            // 舵机悲伤姿势
     }
 
     void OnThinking() {
@@ -566,6 +656,7 @@ public:
         PerformMotorAction(3, 150); // LEFT for 150ms - 轻微左转表示思考
         vTaskDelay(pdMS_TO_TICKS(200));
         PerformMotorAction(4, 150); // RIGHT for 150ms - 右转表示思考
+        servo_.ThinkPose();          // 舵机思考姿势
     }
 
     void OnListening() {
@@ -573,11 +664,13 @@ public:
         PerformMotorAction(3, 100); // LEFT for 100ms - 轻柔左转
         vTaskDelay(pdMS_TO_TICKS(150));
         PerformMotorAction(4, 100); // RIGHT for 100ms - 右转表示倾听
+        servo_.Nod();                // 舵机点头
     }
 
     void OnSpeaking() {
         ESP_LOGI(TAG, "电机情感: 说话被触发 - 执行前进动作");
         PerformMotorAction(1, 250); // FORWARD for 250ms - 前进表示说话
+        servo_.ShakeHead();          // 舵机摇头（说话时的自然动作）
     }
 
     void OnExcited() {
@@ -587,6 +680,7 @@ public:
         PerformMotorAction(3, 150); // LEFT for 150ms - 快速左转
         vTaskDelay(pdMS_TO_TICKS(50));
         PerformMotorAction(4, 150); // RIGHT for 150ms - 快速右转
+        servo_.ExcitedDance();       // 舵机兴奋动作
     }
 
     void OnLoving() {
@@ -594,6 +688,7 @@ public:
         PerformMotorAction(1, 300); // FORWARD for 300ms - 温柔前进
         vTaskDelay(pdMS_TO_TICKS(200));
         PerformMotorAction(3, 200); // LEFT for 200ms - 轻柔左转
+        servo_.WaveHands();          // 舵机挥手
     }
 
     void OnAngry() {
@@ -601,6 +696,10 @@ public:
         PerformMotorAction(2, 200); // BACKWARD for 200ms - 后退表示生气
         vTaskDelay(pdMS_TO_TICKS(100));
         PerformMotorAction(1, 200); // FORWARD for 200ms - 前冲表示生气
+        // 舵机：双手叉腰（举高），摇头
+        servo_.MoveTo(-1, 40, 40);  // 双手举起
+        vTaskDelay(pdMS_TO_TICKS(300));
+        servo_.ShakeHead();          // 摇头表示生气
     }
 
     void OnSurprised() {
@@ -608,6 +707,10 @@ public:
         PerformMotorAction(2, 100); // BACKWARD for 100ms - 快速后退
         vTaskDelay(pdMS_TO_TICKS(150));
         PerformMotorAction(1, 200); // FORWARD for 200ms - 前进表示惊讶
+        // 舵机：双手张开（惊讶姿势）
+        servo_.MoveTo(130, 30, 150); // 抬头，左手举起，右手张开
+        vTaskDelay(pdMS_TO_TICKS(500));
+        servo_.CenterAll();           // 回到中间
     }
 
     void OnConfused() {
@@ -617,6 +720,10 @@ public:
         PerformMotorAction(4, 100); // RIGHT for 100ms - 犹豫右转
         vTaskDelay(pdMS_TO_TICKS(200));
         PerformMotorAction(3, 100); // LEFT for 100ms - 再次犹豫
+        // 舵机：歪头表示困惑
+        servo_.SetNeckAngle(120);    // 头歪向一边
+        vTaskDelay(pdMS_TO_TICKS(800));
+        servo_.CenterAll();           // 回到中间
     }
 
     void OnIdle() {
@@ -695,6 +802,38 @@ extern "C" void HandleMotorIdleAction(void) {
 extern "C" void HandleMotorActionForDance(uint8_t speed_percent) {
     auto board = static_cast<CompactWifiBoard*>(&Board::GetInstance());
     board->MotorDance(speed_percent);
+}
+
+// 舵机控制全局接口（供 web_server 调用）
+// action: "center", "wave", "nod", "shake", "neck", "left", "right"
+// angle: 角度值（仅 neck/left/right 有效，0-180）
+extern "C" void HandleServoAction(const char* action, int angle) {
+    auto board = static_cast<CompactWifiBoard*>(&Board::GetInstance());
+    auto& servo = board->GetServoController();
+    if (!action) return;
+
+    std::string act(action);
+    if (act == "center") {
+        servo.CenterAll();
+    } else if (act == "wave") {
+        servo.WaveHands();
+    } else if (act == "nod") {
+        servo.Nod();
+    } else if (act == "shake") {
+        servo.ShakeHead();
+    } else if (act == "neck") {
+        servo.SetNeckAngle(angle);
+    } else if (act == "left") {
+        servo.SetLeftAngle(angle);
+    } else if (act == "right") {
+        servo.SetRightAngle(angle);
+    }
+}
+
+// 舵机引脚测试函数（供 web_server 调用）
+extern "C" void HandleServoTestPin(int pin, int angle) {
+    auto board = static_cast<CompactWifiBoard*>(&Board::GetInstance());
+    board->GetServoController().TestPin(pin, angle);
 }
 
 DECLARE_BOARD(CompactWifiBoard);

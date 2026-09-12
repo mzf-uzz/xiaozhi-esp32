@@ -3,6 +3,7 @@
 #include <cstring>
 #include <cJSON.h>
 #include <esp_system.h>
+#include <driver/gpio.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <stdlib.h>
@@ -11,6 +12,8 @@
 extern "C" void HandleMotorActionForApplication(int direction, int speed, int duration_ms, int priority);
 extern "C" void HandleMotorActionForEmotion(const char* emotion);
 extern "C" void HandleMotorActionForDance(uint8_t speed_percent);
+extern "C" void HandleServoAction(const char* action, int angle);
+extern "C" void HandleServoTestPin(int pin, int angle);
 
 static const char *TAG = "WebServer";
 
@@ -27,7 +30,7 @@ bool WebServer::Start(int port) {
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = port;
-    config.max_uri_handlers = 10;
+    config.max_uri_handlers = 16;
     // 增加超时设置以更好地处理频繁请求
     config.recv_wait_timeout = 5;  // 接收超时5秒
     config.send_wait_timeout = 5;  // 发送超时5秒
@@ -111,6 +114,42 @@ bool WebServer::Start(int port) {
         .user_ctx  = this
     };
     httpd_register_uri_handler(server_handle_, &api_config_post_uri);
+
+    // 注册舵机控制处理器
+    httpd_uri_t api_servo_uri = {
+        .uri       = "/api/servo",
+        .method    = HTTP_POST,
+        .handler   = api_servo_handler,
+        .user_ctx  = this
+    };
+    httpd_register_uri_handler(server_handle_, &api_servo_uri);
+
+    // 注册 GPIO 扫描调试处理器（逐个引脚输出高电平，查找电机接线）
+    httpd_uri_t api_gpio_scan_uri = {
+        .uri       = "/api/debug/gpio_test",
+        .method    = HTTP_POST,
+        .handler   = api_gpio_scan_handler,
+        .user_ctx  = this
+    };
+    httpd_register_uri_handler(server_handle_, &api_gpio_scan_uri);
+
+    // GPIO 测试网页
+    httpd_uri_t gpio_test_page_uri = {
+        .uri       = "/gpio_test",
+        .method    = HTTP_GET,
+        .handler   = gpio_test_page_handler,
+        .user_ctx  = this
+    };
+    httpd_register_uri_handler(server_handle_, &gpio_test_page_uri);
+
+    // 舵机测试网页
+    httpd_uri_t servo_test_page_uri = {
+        .uri       = "/servo_test",
+        .method    = HTTP_GET,
+        .handler   = servo_test_page_handler,
+        .user_ctx  = this
+    };
+    httpd_register_uri_handler(server_handle_, &servo_test_page_uri);
 
     ESP_LOGI(TAG, "Web server started successfully");
     return true;
@@ -1297,6 +1336,236 @@ esp_err_t WebServer::api_config_post_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Configuration callback not set");
     }
 
+    return ESP_OK;
+}
+
+// 舵机控制 API handler
+// POST /api/servo
+// 请求体 JSON: {"action": "center|wave|nod|shake|neck|left|right", "angle": 90}
+// angle 仅在 action 为 neck/left/right 时有效，范围 0-180
+esp_err_t WebServer::api_servo_handler(httpd_req_t *req) {
+    // 设置CORS头
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "POST, OPTIONS");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
+
+    // 处理 OPTIONS 预检请求
+    if (req->method == HTTP_OPTIONS) {
+        httpd_resp_send(req, NULL, 0);
+        return ESP_OK;
+    }
+
+    char content[256];
+    int ret = httpd_req_recv(req, content, sizeof(content));
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No content");
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_Parse(content);
+    if (root == NULL) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    // 获取 action 参数（必需）
+    cJSON* action_json = cJSON_GetObjectItem(root, "action");
+    if (!cJSON_IsString(action_json)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing 'action' parameter");
+        return ESP_FAIL;
+    }
+    std::string action = action_json->valuestring;
+
+    // 获取 angle 参数（可选，默认 90）
+    int angle = 90;
+    cJSON* angle_json = cJSON_GetObjectItem(root, "angle");
+    if (cJSON_IsNumber(angle_json)) {
+        angle = angle_json->valueint;
+        if (angle < 0) angle = 0;
+        if (angle > 180) angle = 180;
+    }
+
+    // 获取 pin 参数（仅 test 模式使用）
+    int test_pin = 9;
+    cJSON* pin_json = cJSON_GetObjectItem(root, "pin");
+    if (cJSON_IsNumber(pin_json)) {
+        test_pin = pin_json->valueint;
+    }
+
+    cJSON_Delete(root);
+
+    ESP_LOGI(TAG, "舵机控制请求: action=%s, angle=%d, pin=%d", action.c_str(), angle, test_pin);
+
+    // "test" action: 在任意指定 GPIO 上输出 PWM 测试舵机
+    if (action == "test") {
+        HandleServoTestPin(test_pin, angle);
+    } else {
+        HandleServoAction(action.c_str(), angle);
+    }
+
+    // 返回成功响应
+    char response[128];
+    snprintf(response, sizeof(response), "{\"status\":\"ok\",\"action\":\"%s\",\"angle\":%d}", action.c_str(), angle);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+
+    return ESP_OK;
+}
+
+// GPIO 单引脚测试 handler
+// POST /api/debug/gpio_test
+// 测试单个 GPIO 引脚输出高/低电平
+// 请求体: {"pin": 14, "level": 1}
+esp_err_t WebServer::api_gpio_scan_handler(httpd_req_t *req) {
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+    char content[128];
+    int ret = httpd_req_recv(req, content, sizeof(content));
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No content");
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_Parse(content);
+    if (root == NULL) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON* pin_json = cJSON_GetObjectItem(root, "pin");
+    cJSON* level_json = cJSON_GetObjectItem(root, "level");
+    if (!cJSON_IsNumber(pin_json) || !cJSON_IsNumber(level_json)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Need pin and level");
+        return ESP_FAIL;
+    }
+
+    int pin = pin_json->valueint;
+    int level = level_json->valueint;
+    cJSON_Delete(root);
+
+    if (pin < 0 || pin > 48) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Pin out of range");
+        return ESP_FAIL;
+    }
+
+    gpio_num_t gpio = (gpio_num_t)pin;
+
+    // 配置为输出
+    gpio_config_t io_conf = {};
+    io_conf.pin_bit_mask = (1ULL << gpio);
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    gpio_config(&io_conf);
+
+    // 设置电平
+    gpio_set_level(gpio, level ? 1 : 0);
+    ESP_LOGI(TAG, "GPIO %d = %s", pin, level ? "HIGH" : "LOW");
+
+    char resp[128];
+    snprintf(resp, sizeof(resp), "{\"status\":\"ok\",\"pin\":%d,\"level\":%d}", pin, level);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+// 舵机测试网页 handler
+esp_err_t WebServer::servo_test_page_handler(httpd_req_t *req) {
+    const char* html = R"rawhtml(
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Servo Test</title>
+<style>
+body{font-family:Arial;padding:10px;background:#1a1a2e;color:#fff}
+h2{color:#e94560}
+.card{background:#16213e;border-radius:10px;padding:15px;margin:10px 0}
+.btn{display:inline-block;margin:3px;padding:10px 15px;border:none;border-radius:5px;cursor:pointer;font-size:14px;color:#fff}
+.left{background:#3498db}.center{background:#2ecc71}.right{background:#e74c3c}
+.angle{margin:5px 0}
+input[type=range]{width:100%}
+.log{margin:5px 0;padding:8px;background:#0f3460;border-radius:5px;font-size:12px}
+</style></head><body>
+<h2>舵机测试 - 逐个引脚测试</h2>
+<p>测试方法：选择引脚 → 点击按钮 → 观察哪个舵机动了</p>
+<div class="log" id="log">Ready</div>
+
+<div class="card">
+<h3>测试引脚: <span id="curPin">9</span></h3>
+<select id="pinSel" onchange="document.getElementById('curPin').textContent=this.value" style="padding:5px;font-size:16px">
+<option value="9">GPIO 9</option>
+<option value="10">GPIO 10</option>
+<option value="11">GPIO 11</option>
+<option value="12">GPIO 12</option>
+<option value="13">GPIO 13</option>
+<option value="14">GPIO 14</option>
+<option value="15">GPIO 15</option>
+<option value="16">GPIO 16</option>
+<option value="17">GPIO 17</option>
+<option value="18">GPIO 18</option>
+<option value="21">GPIO 21</option>
+<option value="47">GPIO 47</option>
+</select>
+<div class="angle">
+<input type="range" id="angleSlider" min="0" max="180" value="90" oninput="document.getElementById('angleVal').textContent=this.value">
+角度: <span id="angleVal">90</span>°
+</div>
+<button class="btn left" onclick="setAngle(0)">0° (最左)</button>
+<button class="btn center" onclick="setAngle(90)">90° (中间)</button>
+<button class="btn right" onclick="setAngle(180)">180° (最右)</button>
+<br>
+<button class="btn center" onclick="setAngle(parseInt(document.getElementById('angleSlider').value))">发送当前角度</button>
+</div>
+
+<script>
+function setAngle(angle){
+var pin=document.getElementById('pinSel').value;
+document.getElementById('log').innerHTML='GPIO '+pin+' -> '+angle+'度 (观察哪个舵机动了)';
+fetch('/api/servo',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({action:'test',pin:parseInt(pin),angle:angle})})
+.then(r=>r.json()).then(d=>{document.getElementById('log').innerHTML='GPIO '+pin+' -> '+angle+'度 OK';})
+.catch(e=>{document.getElementById('log').innerHTML='Error: '+e;});
+}
+</script></body></html>
+)rawhtml";
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+// GPIO 测试网页 handler
+esp_err_t WebServer::gpio_test_page_handler(httpd_req_t *req) {
+    const char* html = R"rawhtml(
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GPIO Test</title>
+<style>
+body{font-family:Arial;padding:10px;background:#1a1a2e;color:#fff}
+h2{color:#e94560}
+.btn{display:inline-block;margin:3px;padding:8px 12px;border:none;border-radius:5px;cursor:pointer;font-size:14px;color:#fff}
+.on{background:#27ae60}.off{background:#e74c3c}.auto{background:#f39c12}
+.msg{margin:5px 0;padding:8px;background:#16213e;border-radius:5px}
+</style></head><body>
+<h2>GPIO Motor Pin Finder</h2>
+<p>Click each pin's ON button. If the left motor moves, that's the pin!</p>
+<div class="msg" id="log">Ready</div>
+<div id="pins"></div>
+<script>
+var pins=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48];
+var div=document.getElementById('pins');
+pins.forEach(function(p){
+var row=document.createElement('div');
+row.innerHTML='<b>GPIO '+p+'</b> <button class="btn on" onclick="set('+p+',1)">ON</button> <button class="btn off" onclick="set('+p+',0)">OFF</button>';
+div.appendChild(row);
+});
+function set(pin,level){
+fetch('/api/debug/gpio_test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin:pin,level:level})})
+.then(r=>r.json()).then(d=>{document.getElementById('log').innerHTML='GPIO '+pin+' = '+(level?'HIGH':'LOW');})
+.catch(e=>{document.getElementById('log').innerHTML='Error: '+e;});
+}
+</script></body></html>
+)rawhtml";
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
 

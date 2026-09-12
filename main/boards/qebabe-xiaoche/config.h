@@ -57,10 +57,21 @@
 #define LAMP_GPIO GPIO_NUM_18
 
 // Motor control pins for TC1508 module (N20 motors as wheels)
-// Temporarily changed MOTOR_RB_GPIO from GPIO_NUM_3 to GPIO_NUM_21 to avoid strapping pin issues
-#define MOTOR_LF_GPIO GPIO_NUM_12   // Left Forward
-#define MOTOR_LB_GPIO GPIO_NUM_13  // Left Backward
-#define MOTOR_RF_GPIO GPIO_NUM_14  // Right Forward
-#define MOTOR_RB_GPIO GPIO_NUM_21  // Right Backward (was GPIO_NUM_3)
+#define MOTOR_LF_GPIO GPIO_NUM_18   // Left Forward (IN1)
+#define MOTOR_LB_GPIO GPIO_NUM_17   // Left Backward (IN2)
+#define MOTOR_RF_GPIO GPIO_NUM_14   // Right Forward (IN3)
+#define MOTOR_RB_GPIO GPIO_NUM_13   // Right Backward (IN4)
+
+// SG90 舵机控制引脚
+#define SERVO_NECK_GPIO   GPIO_NUM_9   // 脖子舵机信号线
+#define SERVO_LEFT_GPIO   GPIO_NUM_10   // 左手舵机信号线
+#define SERVO_RIGHT_GPIO  GPIO_NUM_11  // 右手舵机信号线
+
+// SG90 舵机参数
+#define SERVO_MIN_PULSEWIDTH_US  500    // 最小脉宽 0.5ms (对应 0°)
+#define SERVO_MAX_PULSEWIDTH_US  2500   // 最大脉宽 2.5ms (对应 180°)
+#define SERVO_MIN_DEGREE         0      // 最小角度
+#define SERVO_MAX_DEGREE         180    // 最大角度
+#define SERVO_CENTER_DEGREE      90     // 中间角度
 
 #endif // _BOARD_CONFIG_H_

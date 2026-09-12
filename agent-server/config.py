@@ -24,7 +24,7 @@ WS_PORT: int = int(os.getenv("WS_PORT", "8765"))
 DEVICE_TOKEN: str = os.getenv("DEVICE_TOKEN", "xiaozhi-agent-token")
 
 # ─── 服务器地址（设备需要能访问到）─────────────────────────────────────
-SERVER_HOST: str = os.getenv("SERVER_HOST", "192.168.31.101")
+SERVER_HOST: str = os.getenv("SERVER_HOST", "10.140.147.96")
 
 # ─── 音频参数 ───────────────────────────────────────────────────────
 OPUS_SAMPLE_RATE: int = 16000       # 设备录音采样率
